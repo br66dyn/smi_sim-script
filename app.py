@@ -5,6 +5,7 @@
 #
 # This is a single-file, browser-based interactive app with sliders + live-updating outputs.
 
+import heapq
 import math
 import random
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ import streamlit as st
 # ============================== CORE DES (pure functions) ==============================
 
 RNG_SEED = 42
+OLD_COMBINED_CHAMBER_CAPACITY = 2
 NEW_PAINT_BOOTH_CAPACITY = 2
 
 
@@ -37,6 +39,8 @@ class SimResults:
     util_bake: float  # NEW
 
     avg_wip: float
+    scrap_times: List[float]
+    total_reworked: int
 
 
 def batch_arrivals(window_minutes: float, batch_size: int, batch_interval: float) -> List[float]:
@@ -64,6 +68,14 @@ def coat_duration(
     return deterministic_time
 
 
+def schedule_on_parallel_resource(arrival_time: float, service_time: float, next_free: List[float]) -> Tuple[float, float]:
+    slot_index = min(range(len(next_free)), key=lambda k: next_free[k])
+    start_time = max(arrival_time, next_free[slot_index])
+    end_time = start_time + service_time
+    next_free[slot_index] = end_time
+    return start_time, end_time
+
+
 def _sum_busy_within_window(starts: List[float], ends: List[float], window_T: float) -> float:
     busy = 0.0
     for s, e in zip(starts, ends):
@@ -74,20 +86,20 @@ def _sum_busy_within_window(starts: List[float], ends: List[float], window_T: fl
     return busy
 
 
-def _time_weighted_wip(arrivals: List[float], completions: List[float], window_T: float) -> float:
+def _time_weighted_wip(arrivals: List[float], departures: List[float], window_T: float) -> float:
     # Time-average WIP over [0, window_T] via event integration.
     events: List[Tuple[float, int]] = []
     for t in arrivals:
         if t <= window_T:
             events.append((t, +1))
-    for t in completions:
+    for t in departures:
         if t <= window_T:
             events.append((t, -1))
 
     if not events:
         return 0.0
 
-    # At identical times: arrivals before completions (+1 then -1)
+    # At identical times: arrivals before departures (+1 then -1)
     events.sort(key=lambda x: (x[0], -x[1]))
 
     wip = 0
@@ -117,6 +129,37 @@ def percentile(data: List[float], p: float) -> float:
     return d[f] + (k - f) * (d[c] - d[f])
 
 
+def process_rework_outcome(
+    process_end: float,
+    rack_id: int,
+    rework_attempt: int,
+    initial_arrivals: List[float],
+    polish_time: float,
+    max_rework_attempts: int,
+    rework_success_rate: float,
+    rng: random.Random,
+    pending_racks: List[Tuple[float, int, int]],
+    completion_times: List[float],
+    cycle_times: List[float],
+    scrap_times: List[float],
+    final_departures: List[float],
+) -> Tuple[int, bool]:
+    if rng.random() < rework_success_rate:
+        completion_times.append(process_end)
+        cycle_times.append(process_end - initial_arrivals[rack_id])
+        final_departures[rack_id] = process_end
+        return 0, True
+
+    if rework_attempt < max_rework_attempts:
+        next_attempt = rework_attempt + 1
+        heapq.heappush(pending_racks, (process_end + polish_time, rack_id, next_attempt))
+        return 1, False
+
+    scrap_times.append(process_end)
+    final_departures[rack_id] = process_end
+    return 0, False
+
+
 def simulate_old(
     sim_hours: float,
     batch_size: int,
@@ -131,39 +174,78 @@ def simulate_old(
     paint_time_mode: str,
     coat_min: float,
     coat_max: float,
+    scrap_rate: float,
+    rework_success_rate: float,
+    polish_time: float,
+    max_rework_attempts: int,
 ) -> SimResults:
     T = sim_hours * 60.0
-    arrivals = batch_arrivals(T, batch_size, batch_interval)
+    initial_arrivals = batch_arrivals(T, batch_size, batch_interval)
     rng = random.Random(RNG_SEED)
 
-    next_free = [0.0] * n_combined
-    starts, ends, waits, cycles, completions = [], [], [], [], []
+    combined_capacity = n_combined * OLD_COMBINED_CHAMBER_CAPACITY
+    next_free = [0.0] * combined_capacity
 
-    for a in arrivals:
+    pending_racks = [(arrival, rack_id, 0) for rack_id, arrival in enumerate(initial_arrivals)]
+    heapq.heapify(pending_racks)
+
+    starts, ends = [], []
+    waits, completion_times, cycle_times, scrap_times = [], [], [], []
+    final_departures = [0.0] * len(initial_arrivals)
+    total_reworked = 0
+
+    while pending_racks:
+        arrival_time, rack_id, rework_attempt = heapq.heappop(pending_racks)
+
         rack_coat1 = coat_duration(paint_time_mode, coat1, coat_min, coat_max, rng)
         rack_coat2 = coat_duration(paint_time_mode, coat2, coat_min, coat_max, rng)
         service_time = rack_coat1 + flash1 + rack_coat2 + flash2 + bake + cool
 
-        j = min(range(n_combined), key=lambda k: next_free[k])
-        start = max(a, next_free[j])
-        end = start + service_time
-        next_free[j] = end
+        start_time, end_time = schedule_on_parallel_resource(arrival_time, service_time, next_free)
 
-        starts.append(start)
-        ends.append(end)
-        waits.append(start - a)
-        cycles.append(end - a)
-        completions.append(end)
+        starts.append(start_time)
+        ends.append(end_time)
+        waits.append(start_time - arrival_time)
+
+        if rework_attempt == 0:
+            if rng.random() < scrap_rate:
+                if max_rework_attempts > 0:
+                    total_reworked += 1
+                    heapq.heappush(pending_racks, (end_time + polish_time, rack_id, 1))
+                else:
+                    scrap_times.append(end_time)
+                    final_departures[rack_id] = end_time
+            else:
+                completion_times.append(end_time)
+                cycle_times.append(end_time - initial_arrivals[rack_id])
+                final_departures[rack_id] = end_time
+        else:
+            added_rework, _ = process_rework_outcome(
+                process_end=end_time,
+                rack_id=rack_id,
+                rework_attempt=rework_attempt,
+                initial_arrivals=initial_arrivals,
+                polish_time=polish_time,
+                max_rework_attempts=max_rework_attempts,
+                rework_success_rate=rework_success_rate,
+                rng=rng,
+                pending_racks=pending_racks,
+                completion_times=completion_times,
+                cycle_times=cycle_times,
+                scrap_times=scrap_times,
+                final_departures=final_departures,
+            )
+            total_reworked += added_rework
 
     busy_total = _sum_busy_within_window(starts, ends, T)
-    util_combined = busy_total / (n_combined * T)
-    avg_wip = _time_weighted_wip(arrivals, completions, T)
+    util_combined = busy_total / (combined_capacity * T)
+    avg_wip = _time_weighted_wip(initial_arrivals, final_departures, T)
 
     return SimResults(
         name="OLD",
-        arrivals=arrivals,
-        completion_times=completions,
-        cycle_times=cycles,
+        arrivals=initial_arrivals,
+        completion_times=completion_times,
+        cycle_times=cycle_times,
         wait_combined=waits,
         wait_paint=[],
         wait_bake=[],
@@ -171,6 +253,8 @@ def simulate_old(
         util_paint=float("nan"),
         util_bake=float("nan"),
         avg_wip=avg_wip,
+        scrap_times=scrap_times,
+        total_reworked=total_reworked,
     )
 
 
@@ -190,61 +274,90 @@ def simulate_new(
     paint_time_mode: str,
     coat_min: float,
     coat_max: float,
+    scrap_rate: float,
+    rework_success_rate: float,
+    polish_time: float,
+    max_rework_attempts: int,
 ) -> SimResults:
     T = sim_hours * 60.0
-    S_bake = bake + cool
-    arrivals = batch_arrivals(T, batch_size, batch_interval)
+    initial_arrivals = batch_arrivals(T, batch_size, batch_interval)
     rng = random.Random(RNG_SEED)
 
-    # Each paint booth has two simultaneous rack positions in the improved process.
     paint_capacity = n_paint * NEW_PAINT_BOOTH_CAPACITY
     next_free_p = [0.0] * paint_capacity
-    p_start, p_end, p_wait = [], [], []
+    next_free_b = [0.0] * n_bake
 
-    for a in arrivals:
+    pending_racks = [(arrival, rack_id, 0) for rack_id, arrival in enumerate(initial_arrivals)]
+    heapq.heapify(pending_racks)
+
+    p_start, p_end, p_wait = [], [], []
+    b_start, b_end, b_wait = [], [], []
+    completion_times, cycle_times, scrap_times = [], [], []
+    final_departures = [0.0] * len(initial_arrivals)
+    total_reworked = 0
+
+    while pending_racks:
+        arrival_time, rack_id, rework_attempt = heapq.heappop(pending_racks)
+
         rack_coat1 = coat_duration(paint_time_mode, coat1, coat_min, coat_max, rng)
         rack_coat2 = coat_duration(paint_time_mode, coat2, coat_min, coat_max, rng)
         paint_service_time = rack_coat1 + flash1 + rack_coat2 + flash2
+        bake_service_time = bake + cool
 
-        j = min(range(paint_capacity), key=lambda k: next_free_p[k])
-        start = max(a, next_free_p[j])
-        end = start + paint_service_time
-        next_free_p[j] = end
+        paint_start, paint_end = schedule_on_parallel_resource(arrival_time, paint_service_time, next_free_p)
+        bake_arrival = paint_end + move
+        bake_start, bake_end = schedule_on_parallel_resource(bake_arrival, bake_service_time, next_free_b)
 
-        p_start.append(start)
-        p_end.append(end)
-        p_wait.append(start - a)
+        p_start.append(paint_start)
+        p_end.append(paint_end)
+        p_wait.append(paint_start - arrival_time)
 
-    bake_arrivals = [e + move for e in p_end]
+        b_start.append(bake_start)
+        b_end.append(bake_end)
+        b_wait.append(bake_start - bake_arrival)
 
-    next_free_b = [0.0] * n_bake
-    b_start, b_end, b_wait = [], [], []
-
-    for a2 in bake_arrivals:
-        j = min(range(n_bake), key=lambda k: next_free_b[k])
-        start = max(a2, next_free_b[j])
-        end = start + S_bake
-        next_free_b[j] = end
-
-        b_start.append(start)
-        b_end.append(end)
-        b_wait.append(start - a2)
-
-    completions = b_end
-    cycles = [c - a for c, a in zip(completions, arrivals)]
+        if rework_attempt == 0:
+            if rng.random() < scrap_rate:
+                if max_rework_attempts > 0:
+                    total_reworked += 1
+                    heapq.heappush(pending_racks, (bake_end + polish_time, rack_id, 1))
+                else:
+                    scrap_times.append(bake_end)
+                    final_departures[rack_id] = bake_end
+            else:
+                completion_times.append(bake_end)
+                cycle_times.append(bake_end - initial_arrivals[rack_id])
+                final_departures[rack_id] = bake_end
+        else:
+            added_rework, _ = process_rework_outcome(
+                process_end=bake_end,
+                rack_id=rack_id,
+                rework_attempt=rework_attempt,
+                initial_arrivals=initial_arrivals,
+                polish_time=polish_time,
+                max_rework_attempts=max_rework_attempts,
+                rework_success_rate=rework_success_rate,
+                rng=rng,
+                pending_racks=pending_racks,
+                completion_times=completion_times,
+                cycle_times=cycle_times,
+                scrap_times=scrap_times,
+                final_departures=final_departures,
+            )
+            total_reworked += added_rework
 
     busy_p = _sum_busy_within_window(p_start, p_end, T)
     busy_b = _sum_busy_within_window(b_start, b_end, T)
 
     util_paint = busy_p / (paint_capacity * T)
     util_bake = busy_b / (n_bake * T)
-    avg_wip = _time_weighted_wip(arrivals, completions, T)
+    avg_wip = _time_weighted_wip(initial_arrivals, final_departures, T)
 
     return SimResults(
         name="NEW",
-        arrivals=arrivals,
-        completion_times=completions,
-        cycle_times=cycles,
+        arrivals=initial_arrivals,
+        completion_times=completion_times,
+        cycle_times=cycle_times,
         wait_combined=[],
         wait_paint=p_wait,
         wait_bake=b_wait,
@@ -252,6 +365,8 @@ def simulate_new(
         util_paint=util_paint,
         util_bake=util_bake,
         avg_wip=avg_wip,
+        scrap_times=scrap_times,
+        total_reworked=total_reworked,
     )
 
 
@@ -263,12 +378,17 @@ def build_summary_df(old: SimResults, new: SimResults, sim_hours: float) -> pd.D
         throughput = completed_within / sim_hours
         mean_ct = sum(res.cycle_times) / len(res.cycle_times) if res.cycle_times else float("nan")
         p95_ct = percentile(res.cycle_times, 95)
+        rework_pct = (res.total_reworked / len(res.arrivals) * 100.0) if res.arrivals else float("nan")
         return {
             "Total Completed (<=window)": float(completed_within),
             "Throughput (racks/hr)": throughput,
             "Mean Cycle Time (min)": mean_ct,
             "P95 Cycle Time (min)": p95_ct,
             "Avg WIP (0-window)": res.avg_wip,
+            "Final Good Completed": float(len(res.completion_times)),
+            "Total Scrapped": float(len(res.scrap_times)),
+            "Total Reworked": float(res.total_reworked),
+            "Rework % of Initial Racks": rework_pct,
         }
 
     df = pd.DataFrame({"OLD": row(old), "NEW": row(new)}).T
@@ -295,13 +415,19 @@ def step_xy(times: List[float]) -> Tuple[List[float], List[float]]:
     return x, y
 
 
+def rework_percentage(res: SimResults) -> float:
+    if not res.arrivals:
+        return float("nan")
+    return res.total_reworked / len(res.arrivals) * 100.0
+
+
 # ============================== STREAMLIT UI ==============================
 
 st.set_page_config(page_title="SMI DES: OLD vs NEW", layout="wide")
 
 st.title("SMI Discrete-Event Simulation: OLD vs NEW")
 st.caption(
-    "Batch arrivals with selectable deterministic or variable coat times. "
+    "Batch arrivals with selectable deterministic or variable coat times, plus polish-triggered rework loops. "
     "OLD uses combined chambers; NEW uses decoupled paint booths and bake-only chambers."
 )
 
@@ -317,7 +443,7 @@ with st.sidebar:
     n_combined = st.slider("OLD: # Combined chambers", min_value=1, max_value=20, value=6, step=1)
     n_paint = st.slider("NEW: # Paint booths", min_value=1, max_value=20, value=4, step=1)
     n_bake = st.slider("NEW: # Bake chambers", min_value=1, max_value=20, value=6, step=1)
-    st.caption("NEW paint capacity assumes 2 racks can be processed in each booth simultaneously.")
+    st.caption("OLD combined chambers and NEW paint booths are both modeled with capacity for 2 racks at once.")
 
     st.divider()
     st.header("Paint Application")
@@ -325,6 +451,19 @@ with st.sidebar:
     coat_min = st.number_input("coat_min", min_value=0.0, value=5.0, step=0.5)
     coat_max = st.number_input("coat_max", min_value=0.0, value=10.0, step=0.5)
     st.caption("Variable mode samples each coat uniformly between coat_min and coat_max.")
+
+    st.divider()
+    st.header("Rework")
+    polish_time = st.slider("Polish time before rework (minutes)", min_value=0, max_value=240, value=20, step=1)
+    max_rework_attempts = st.slider("Max rework attempts", min_value=0, max_value=10, value=1, step=1)
+
+    st.subheader("OLD rework settings")
+    old_scrap_rate = st.slider("OLD initial scrap rate (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0)
+    old_rework_success_rate = st.slider("OLD rework success rate (%)", min_value=0.0, max_value=100.0, value=60.0, step=1.0)
+
+    st.subheader("NEW rework settings")
+    new_scrap_rate = st.slider("NEW initial scrap rate (%)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+    new_rework_success_rate = st.slider("NEW rework success rate (%)", min_value=0.0, max_value=100.0, value=75.0, step=1.0)
 
     st.divider()
     st.header("Times - OLD (minutes)")
@@ -369,6 +508,10 @@ old = simulate_old(
     paint_time_mode=paint_time_mode,
     coat_min=float(coat_min),
     coat_max=float(coat_max),
+    scrap_rate=float(old_scrap_rate) / 100.0,
+    rework_success_rate=float(old_rework_success_rate) / 100.0,
+    polish_time=float(polish_time),
+    max_rework_attempts=int(max_rework_attempts),
 )
 
 new = simulate_new(
@@ -387,6 +530,10 @@ new = simulate_new(
     paint_time_mode=paint_time_mode,
     coat_min=float(coat_min),
     coat_max=float(coat_max),
+    scrap_rate=float(new_scrap_rate) / 100.0,
+    rework_success_rate=float(new_rework_success_rate) / 100.0,
+    polish_time=float(polish_time),
+    max_rework_attempts=int(max_rework_attempts),
 )
 
 summary_df = build_summary_df(old, new, sim_hours)
@@ -407,8 +554,8 @@ with col1:
     plt.plot([t / 60.0 for t in xn], yn, label="NEW")
     plt.axvline(T / 60.0, linestyle="--", label="arrival window")
     plt.xlabel("Time (hours)")
-    plt.ylabel("Cumulative racks completed")
-    plt.title("Cumulative Completions")
+    plt.ylabel("Cumulative good racks completed")
+    plt.title("Cumulative Good Completions")
     plt.legend()
     plt.tight_layout()
     st.pyplot(fig1, clear_figure=True)
@@ -445,6 +592,13 @@ qa_cols[2].metric(
     f"OLD {old_mean_wait:.2f} | NEW paint {new_mean_wait_p:.2f} | NEW bake {new_mean_wait_b:.2f}",
 )
 
+st.subheader("Rework Outcomes")
+rework_cols = st.columns(4)
+rework_cols[0].metric("Final Good Completed", f"OLD {len(old.completion_times)} | NEW {len(new.completion_times)}")
+rework_cols[1].metric("Total Scrapped", f"OLD {len(old.scrap_times)} | NEW {len(new.scrap_times)}")
+rework_cols[2].metric("Total Reworked", f"OLD {old.total_reworked} | NEW {new.total_reworked}")
+rework_cols[3].metric("Rework %", f"OLD {rework_percentage(old):.1f}% | NEW {rework_percentage(new):.1f}%")
+
 st.subheader("Summary Table")
 st.dataframe(summary_df.style.format(precision=3), use_container_width=True)
 
@@ -453,11 +607,14 @@ with st.expander("Model assumptions (what this sim is and is NOT)"):
         """
 - Batch arrivals occur at a fixed batch interval, and each batch releases the selected number of racks at once.
 - Coat times can stay deterministic or vary uniformly between `coat_min` and `coat_max`; flash time stays fixed.
+- A failed rack enters a delay-only polish step, then returns through the full OLD or NEW process as a rework rack.
+- Each system has its own initial scrap rate and rework success rate.
+- Rework attempts use the same paint and bake resources as normal racks, and racks are permanently scrapped when they fail after the selected rework-attempt limit.
 - FIFO queues with identical parallel servers.
-- OLD: a rack occupies one *combined* chamber for the entire process (coat/flash/coat/flash/bake/cool).
+- OLD: each combined chamber provides capacity for 2 racks through the entire process (coat/flash/coat/flash/bake/cool).
 - NEW: each paint booth provides capacity for 2 racks at once, then each rack moves after paint and waits for bake/cool separately.
-- No labor constraints, no downtimes, no scrap/rework, no shift schedules.
+- No labor constraints, no downtimes, no shift schedules.
 
-If you want variability (distributions), downtimes, or labor limits, the core DES can be extended.
+If you want labor limits or downtime, the core DES can be extended.
 """
     )

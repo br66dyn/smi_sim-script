@@ -12,6 +12,7 @@ It is intended to estimate:
 - WIP
 - queue waits
 - utilization
+- scrap and rework outcomes
 
 It is not yet a full-factory model.
 
@@ -54,7 +55,8 @@ Modeling guidance:
 
 ### OLD process
 - 6 combined chambers
-- a rack occupies one combined chamber for the full duration:
+- each combined chamber is currently modeled with capacity for 2 simultaneous racks
+- each rack occupies one of those chamber positions for the full duration:
   coat1 + flash1 + coat2 + flash2 + bake + cool
 
 ### NEW process
@@ -73,7 +75,25 @@ Real-world note:
 Modeling guidance:
 - the current app models each NEW paint booth with capacity for 2 simultaneous racks
 - booth capacity is represented as added parallel paint capacity while keeping FIFO queue logic
-- old process capacity should be reviewed carefully depending on whether each combined chamber also effectively handles multiple racks at once in reality
+- the current app also models each OLD combined chamber with capacity for 2 simultaneous racks
+
+## Rework / quality assumptions
+Real-world note:
+- the major real bottleneck is the rework loop after topcoat:
+  paint -> polish -> repair attempt -> PP2 -> repaint if needed
+
+Current model:
+- each system has its own initial scrap rate
+- each system has its own rework success rate
+- if a rack fails initial processing, it enters a delay-only polish step and then returns through the full paint/bake process
+- each failed rework cycle can loop again until the selected maximum rework-attempt limit is reached
+- if a rack still fails after the allowed rework attempts, it becomes permanent scrap
+- rework consumes the same OLD or NEW paint/bake resources as a normal rack
+
+Modeling guidance:
+- this is still a simplified representation of the real paint -> polish -> PP2 -> repaint loop
+- polish is currently modeled as time delay only, not a separate constrained resource
+- scrap and rework results should be interpreted as scenario-comparison outputs rather than exact production forecasts
 
 ## Labor assumptions
 Real-world note:
@@ -110,22 +130,6 @@ Current model:
 Modeling guidance:
 - future versions should support optional scheduled downtime
 
-## Rework / quality assumptions
-Real-world note:
-- the major real bottleneck is the rework loop after topcoat:
-  paint -> polish -> repair attempt -> PP2 -> repaint if needed
-
-Current model:
-- no rework, no polish, no PP2, no defect probability
-
-Modeling guidance:
-- this is the highest-priority realism improvement
-- future versions should support:
-  - defect probability
-  - polish/repair stage
-  - return loop to repaint
-  - rework counters
-
 ## Queueing assumptions
 Current model generally assumes:
 - FIFO queues
@@ -142,6 +146,10 @@ The app should continue to produce:
 - average WIP
 - queue wait metrics
 - resource utilization
+- final good completed racks
+- total scrapped racks
+- total reworked racks
+- rework percentage
 
 ## Recommended modeling modes
 To keep the app useful, support these modes when possible:
@@ -149,16 +157,16 @@ To keep the app useful, support these modes when possible:
 ### Simple mode
 - deterministic times
 - batch size = 1 if a simple arrival pattern is preferred
+- scrap and rework rates can be set to 0 if rework is not being studied
 - no downtime
 - no labor limits
-- no rework
 
 ### Improved realism mode
 - batch arrivals
 - variable coat times
 - 2 racks per booth
+- polish-triggered rework loops
 - optional labor limits
 - optional downtime
-- optional rework loop
 
 This split helps preserve explainability while improving realism.
