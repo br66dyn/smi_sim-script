@@ -5,32 +5,36 @@ Improve realism and usefulness of the SMI simulation without making the app frag
 
 ## Highest-priority improvements
 
-### 1. Add batch arrivals
+### Completed in current version
+
+#### 1. Add batch arrivals
 Reason:
 Real racks arrive in batches from upstream operations, not in perfect one-at-a-time steady flow.
 
-Target:
-- allow user to choose batch size
-- allow user to choose batch interval
-- preserve simple deterministic mode if useful
+Implemented:
+- user can choose batch size
+- user can choose batch interval
+- simple behavior is still available by setting batch size to 1
 
-### 2. Add variable coat times
+#### 2. Add variable coat times
 Reason:
-Actual coat application is roughly 5–10 minutes, not a single exact value.
+Actual coat application is roughly 5-10 minutes, not a single exact value.
 
-Target:
-- allow user to choose fixed times or range/distribution-based times
-- start simple if needed (uniform or triangular)
+Implemented:
+- user can choose deterministic or variable coat timing
+- variable mode uses a uniform range with user inputs for `coat_min` and `coat_max`
 
-### 3. Add 2-racks-per-booth logic
+#### 3. Add 2-racks-per-booth logic
 Reason:
 Typically 2 paint racks fit in one booth, so single-rack-per-booth logic underestimates paint capacity.
 
-Target:
-- allow booth rack capacity to be set
-- ensure queueing logic still works cleanly
+Implemented:
+- NEW paint booths now model capacity for 2 simultaneous racks
+- FIFO queueing logic is preserved
 
-### 4. Add optional labor constraints
+### Next highest-priority improvements
+
+#### 4. Add optional labor constraints
 Reason:
 There are 3 operators per shift and each operator uses 2 booths.
 
@@ -38,10 +42,10 @@ Target:
 - allow optional labor toggle
 - tie active booth capacity to operator availability
 
-### 5. Add setup / cleaning / changeover logic
+#### 5. Add setup / cleaning / changeover logic
 Reason:
 Real process includes:
-- parts cleaning (20–30 min)
+- parts cleaning (20-30 min)
 - paint mixing (~10 min)
 - paint gun cleaning / color or coating changeover (~20 min)
 
@@ -49,7 +53,7 @@ Target:
 - start with optional batch setup delays
 - avoid overcomplicating the first implementation
 
-### 6. Add scheduled downtime
+#### 6. Add scheduled downtime
 Reason:
 Booths go down weekly for routine maintenance.
 
@@ -57,7 +61,7 @@ Target:
 - allow optional scheduled downtime input
 - model a few hours of outage once per week or at a defined interval
 
-### 7. Add rework loop
+#### 7. Add rework loop
 Reason:
 The paint -> polish -> PP2 -> repaint loop is the largest real bottleneck and the most important missing realism feature.
 
@@ -92,12 +96,9 @@ Allow export of:
 - Keep the code readable for a senior capstone project
 - Maintain a simple baseline mode for presentation purposes
 
-## Suggested implementation order
-1. batch arrivals
-2. variable coat times
-3. 2-racks-per-booth logic
-4. labor constraints
-5. setup/changeover
-6. downtime
-7. rework loop
-8. additional plots and export features
+## Suggested implementation order from here
+1. labor constraints
+2. setup/changeover
+3. downtime
+4. rework loop
+5. additional plots and export features
