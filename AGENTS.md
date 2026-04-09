@@ -1,28 +1,33 @@
 # AGENTS.md
 
 ## Project
-This repository contains a Streamlit discrete-event simulation for the SMI senior capstone project.
+This repository contains a Streamlit-based discrete-event simulation (DES) for a senior capstone project with SMI Composites.
 
 ## Primary goal
-Preserve the existing working app while adding Version 2 features safely.
+Improve the simulation so it more accurately reflects the real paint-line operation while keeping the app understandable, editable, and stable for academic and stakeholder use.
 
-## Rules
-- Do not break the existing deterministic simulation.
-- Keep the app compatible with Streamlit Cloud.
+## Required behavior
+- Read `PROJECT_CONTEXT.md`, `MODEL_ASSUMPTIONS.md`, and `V2_ROADMAP.md` before making changes.
+- Preserve the existing working Streamlit app unless explicitly asked to replace or refactor it.
 - Prefer simple, readable Python over complex abstractions.
+- Keep the app compatible with Streamlit Cloud.
 - Avoid unnecessary dependencies.
-- Keep all user-facing controls in the Streamlit sidebar unless there is a strong reason otherwise.
-- Preserve existing outputs unless explicitly replacing them with better versions.
-- Explain major modeling assumptions in comments and markdown files.
-- If changing simulation logic, update MODEL_ASSUMPTIONS.md.
-- If adding a feature, update V2_ROADMAP.md to reflect completion.
+- Preserve current outputs unless a change clearly improves them.
+- If simulation logic changes, update `MODEL_ASSUMPTIONS.md`.
+- If roadmap items are completed, update `V2_ROADMAP.md`.
 
-## Run instructions
-- Install with: pip install -r requirements.txt
-- Run with: streamlit run app.py
+## Coding preferences
+- Keep functions small and easy to trace.
+- Use clear variable names.
+- Add comments where modeling assumptions matter.
+- Do not overengineer.
+- Do not silently remove existing functionality.
 
-## Definition of done
-- App runs without import errors.
-- Existing charts still render.
-- Existing metrics still compute.
-- Any new feature has a visible UI and a brief explanation.
+## Validation expectations
+- The app should run without import errors.
+- The app should still render key outputs: throughput, utilization, WIP/wait information, and summary table.
+- Any new inputs should be exposed clearly in the UI.
+- Deterministic/simple mode should remain available even if more realistic options are added.
+
+## Context notes
+This is a capstone decision-support model, not a full production digital twin. Accuracy should improve, but readability and explainability matter.
